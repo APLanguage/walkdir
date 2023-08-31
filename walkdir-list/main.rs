@@ -110,7 +110,7 @@ where
     W2: io::Write,
 {
     for result in args.walkdir(dir) {
-        let dent = match result {
+        let (_, dent) = match result {
             Ok(dent) => dent,
             Err(err) => {
                 if !args.ignore_errors {
@@ -136,7 +136,7 @@ where
     W2: io::Write,
 {
     for result in args.walkdir(dir) {
-        let dent = match result {
+        let (_, dent) = match result {
             Ok(dent) => dent,
             Err(err) => {
                 if !args.ignore_errors {
@@ -268,7 +268,7 @@ impl Args {
     fn walkdir(&self, path: &Path) -> WalkDir {
         let mut walkdir = WalkDir::new(path)
             .follow_links(self.follow_links)
-            .contents_first(self.depth_first)
+            // .contents_first(self.depth_first) TODO: fix contents first
             .same_file_system(self.same_file_system);
         if let Some(x) = self.min_depth {
             walkdir = walkdir.min_depth(x);

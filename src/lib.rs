@@ -240,23 +240,12 @@ struct WalkDirOptions {
     max_open: usize,
     min_depth: usize,
     max_depth: usize,
-    sorter: Option<
-        Box<
-            dyn FnMut(&DirEntry, &DirEntry) -> Ordering
-                + Send
-                + Sync
-                + 'static,
-        >,
-    >,
-    contents_first: bool,
+    sorter: Option<Box<dyn FnMut(&DirEntry, &DirEntry) -> Ordering + Send + Sync + 'static>>,
     same_file_system: bool,
 }
 
 impl fmt::Debug for WalkDirOptions {
-    fn fmt(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-    ) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> result::Result<(), fmt::Error> {
         let sorter_str = if self.sorter.is_some() {
             // FnMut isn't `Debug`
             "Some(...)"
@@ -269,7 +258,6 @@ impl fmt::Debug for WalkDirOptions {
             .field("min_depth", &self.min_depth)
             .field("max_depth", &self.max_depth)
             .field("sorter", &sorter_str)
-            .field("contents_first", &self.contents_first)
             .field("same_file_system", &self.same_file_system)
             .finish()
     }
@@ -291,7 +279,6 @@ impl WalkDir {
                 min_depth: 0,
                 max_depth: ::std::usize::MAX,
                 sorter: None,
-                contents_first: false,
                 same_file_system: false,
             },
             root: root.as_ref().to_path_buf(),
@@ -392,9 +379,7 @@ impl WalkDir {
     /// WalkDir::new("foo").sort_by(|a,b| a.file_name().cmp(b.file_name()));
     /// ```
     pub fn sort_by<F>(mut self, cmp: F) -> Self
-    where
-        F: FnMut(&DirEntry, &DirEntry) -> Ordering + Send + Sync + 'static,
-    {
+    where F: FnMut(&DirEntry, &DirEntry) -> Ordering + Send + Sync + 'static {
         self.opts.sorter = Some(Box::new(cmp));
         self
     }
@@ -416,8 +401,7 @@ impl WalkDir {
     pub fn sort_by_key<K, F>(self, mut cmp: F) -> Self
     where
         F: FnMut(&DirEntry) -> K + Send + Sync + 'static,
-        K: Ord,
-    {
+        K: Ord, {
         self.sort_by(move |a, b| cmp(a).cmp(&cmp(b)))
     }
 
@@ -432,68 +416,6 @@ impl WalkDir {
     /// ```
     pub fn sort_by_file_name(self) -> Self {
         self.sort_by(|a, b| a.file_name().cmp(b.file_name()))
-    }
-
-    /// Yield a directory's contents before the directory itself. By default,
-    /// this is disabled.
-    ///
-    /// When `yes` is `false` (as is the default), the directory is yielded
-    /// before its contents are read. This is useful when, e.g. you want to
-    /// skip processing of some directories.
-    ///
-    /// When `yes` is `true`, the iterator yields the contents of a directory
-    /// before yielding the directory itself. This is useful when, e.g. you
-    /// want to recursively delete a directory.
-    ///
-    /// # Example
-    ///
-    /// Assume the following directory tree:
-    ///
-    /// ```text
-    /// foo/
-    ///   abc/
-    ///     qrs
-    ///     tuv
-    ///   def/
-    /// ```
-    ///
-    /// With contents_first disabled (the default), the following code visits
-    /// the directory tree in depth-first order:
-    ///
-    /// ```no_run
-    /// use walkdir::WalkDir;
-    ///
-    /// for entry in WalkDir::new("foo") {
-    ///     let entry = entry.unwrap();
-    ///     println!("{}", entry.path().display());
-    /// }
-    ///
-    /// // foo
-    /// // foo/abc
-    /// // foo/abc/qrs
-    /// // foo/abc/tuv
-    /// // foo/def
-    /// ```
-    ///
-    /// With contents_first enabled:
-    ///
-    /// ```no_run
-    /// use walkdir::WalkDir;
-    ///
-    /// for entry in WalkDir::new("foo").contents_first(true) {
-    ///     let entry = entry.unwrap();
-    ///     println!("{}", entry.path().display());
-    /// }
-    ///
-    /// // foo/abc/qrs
-    /// // foo/abc/tuv
-    /// // foo/abc
-    /// // foo/def
-    /// // foo
-    /// ```
-    pub fn contents_first(mut self, yes: bool) -> Self {
-        self.opts.contents_first = yes;
-        self
     }
 
     /// Do not cross file system boundaries.
@@ -511,7 +433,7 @@ impl WalkDir {
 }
 
 impl IntoIterator for WalkDir {
-    type Item = Result<DirEntry>;
+    type Item = Result<(WalkAction, DirEntry)>;
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> IntoIter {
@@ -601,13 +523,18 @@ impl Ancestor {
     #[cfg(windows)]
     fn new(dent: &DirEntry) -> io::Result<Ancestor> {
         let handle = Handle::from_path(dent.path())?;
-        Ok(Ancestor { path: dent.path().to_path_buf(), handle })
+        Ok(Ancestor {
+            path: dent.path().to_path_buf(),
+            handle,
+        })
     }
 
     /// Create a new ancestor from the given directory path.
     #[cfg(not(windows))]
     fn new(dent: &DirEntry) -> io::Result<Ancestor> {
-        Ok(Ancestor { path: dent.path().to_path_buf() })
+        Ok(Ancestor {
+            path: dent.path().to_path_buf(),
+        })
     }
 
     /// Returns true if and only if the given open file handle corresponds to
@@ -646,37 +573,51 @@ enum DirList {
     ///
     /// [`fs::read_dir`]: https://doc.rust-lang.org/stable/std/fs/fn.read_dir.html
     /// [`Option<...>`]: https://doc.rust-lang.org/stable/std/option/enum.Option.html
-    Opened { depth: usize, it: result::Result<ReadDir, Option<Error>> },
+    Opened {
+        depth: usize,
+        it: Box<result::Result<ReadDir, Option<Error>>>,
+    },
     /// A closed handle.
     ///
     /// All remaining directory entries are read into memory.
     Closed(vec::IntoIter<Result<DirEntry>>),
 }
 
+/// Action which is taken currently
+#[derive(Debug, Clone, Copy)]
+pub enum WalkAction {
+    /// The iterator is entering a directory
+    EnterDir,
+    /// The iterator is listing a file
+    ListFile,
+    /// The iterator is closing the current dir
+    ExitDir,
+}
+
 impl Iterator for IntoIter {
-    type Item = Result<DirEntry>;
+    type Item = Result<(WalkAction, DirEntry)>;
     /// Advances the iterator and returns the next value.
     ///
     /// # Errors
     ///
     /// If the iterator fails to retrieve the next value, this method returns
     /// an error value. The error will be wrapped in an Option::Some.
-    fn next(&mut self) -> Option<Result<DirEntry>> {
+    fn next(&mut self) -> Option<Result<(WalkAction, DirEntry)>> {
         if let Some(start) = self.start.take() {
             if self.opts.same_file_system {
-                let result = util::device_num(&start)
-                    .map_err(|e| Error::from_path(0, start.clone(), e));
+                let result =
+                    util::device_num(&start).map_err(|e| Error::from_path(0, start.clone(), e));
                 self.root_device = Some(itry!(result));
             }
             let dent = itry!(DirEntry::from_path(0, start, false));
             if let Some(result) = self.handle_entry(dent) {
-                return Some(result);
+                return Some(result.map(|e| (WalkAction::EnterDir, e)));
             }
         }
         while !self.stack_list.is_empty() {
             self.depth = self.stack_list.len();
             if let Some(dentry) = self.get_deferred_dir() {
-                return Some(Ok(dentry));
+                return Some(Ok((WalkAction::ExitDir, dentry)));
             }
             if self.depth > self.opts.max_depth {
                 // If we've exceeded the max depth, pop the current dir
@@ -696,16 +637,25 @@ impl Iterator for IntoIter {
                 Some(Err(err)) => return Some(Err(err)),
                 Some(Ok(dent)) => {
                     if let Some(result) = self.handle_entry(dent) {
-                        return Some(result);
+                        return Some(result.map(|e| {
+                            (
+                                if e.is_dir() {
+                                    WalkAction::EnterDir
+                                } else {
+                                    WalkAction::ListFile
+                                },
+                                e,
+                            )
+                        }));
                     }
                 }
             }
-        }
-        if self.opts.contents_first {
-            self.depth = self.stack_list.len();
-            if let Some(dentry) = self.get_deferred_dir() {
-                return Some(Ok(dentry));
+            if let Some(deferred) = self.deferred_dirs.pop() {
+                return Some(Ok((WalkAction::ExitDir, deferred)));
             }
+        }
+        if let Some(deferred) = self.deferred_dirs.pop() {
+            return Some(Ok((WalkAction::ExitDir, deferred)));
         }
         None
     }
@@ -808,16 +758,14 @@ impl IntoIter {
     /// [`min_depth`]: struct.WalkDir.html#method.min_depth
     /// [`max_depth`]: struct.WalkDir.html#method.max_depth
     pub fn filter_entry<P>(self, predicate: P) -> FilterEntry<Self, P>
-    where
-        P: FnMut(&DirEntry) -> bool,
-    {
-        FilterEntry { it: self, predicate }
+    where P: FnMut(&DirEntry) -> bool {
+        FilterEntry {
+            it: self,
+            predicate,
+        }
     }
 
-    fn handle_entry(
-        &mut self,
-        mut dent: DirEntry,
-    ) -> Option<Result<DirEntry>> {
+    fn handle_entry(&mut self, mut dent: DirEntry) -> Option<Result<DirEntry>> {
         if self.opts.follow_links && dent.file_type().is_symlink() {
             dent = itry!(self.follow(dent));
         }
@@ -838,65 +786,66 @@ impl IntoIter {
             // the follow_links setting. When it's disabled, it should report
             // itself as a symlink. When it's enabled, it should always report
             // itself as the target.
-            let md = itry!(fs::metadata(dent.path()).map_err(|err| {
-                Error::from_path(dent.depth(), dent.path().to_path_buf(), err)
-            }));
+            let md = itry!(fs::metadata(dent.path())
+                .map_err(|err| { Error::from_path(dent.depth(), dent.path().to_path_buf(), err) }));
             if md.file_type().is_dir() {
                 itry!(self.push(&dent));
             }
         }
-        if is_normal_dir && self.opts.contents_first {
-            self.deferred_dirs.push(dent);
+        if self.skippable() {
             None
-        } else if self.skippable() {
-            None
+        } else if is_normal_dir {
+            self.deferred_dirs.push(dent.clone());
+            Some(Ok(dent))
         } else {
             Some(Ok(dent))
         }
     }
 
     fn get_deferred_dir(&mut self) -> Option<DirEntry> {
-        if self.opts.contents_first {
-            if self.depth < self.deferred_dirs.len() {
-                // Unwrap is safe here because we've guaranteed that
-                // `self.deferred_dirs.len()` can never be less than 1
-                let deferred: DirEntry = self
-                    .deferred_dirs
-                    .pop()
-                    .expect("BUG: deferred_dirs should be non-empty");
-                if !self.skippable() {
-                    return Some(deferred);
-                }
-            }
+        if self.depth < self.deferred_dirs.len() {
+            // Unwrap is safe here because we've guaranteed that
+            // `self.deferred_dirs.len()` can never be less than 1
+            let deferred: DirEntry = self
+                .deferred_dirs
+                .pop()
+                .expect("BUG: deferred_dirs should be non-empty");
+            // if !self.skippable() {
+            return Some(deferred);
+            // }
         }
         None
     }
 
     fn push(&mut self, dent: &DirEntry) -> Result<()> {
         // Make room for another open file descriptor if we've hit the max.
-        let free =
-            self.stack_list.len().checked_sub(self.oldest_opened).unwrap();
+        let free = self
+            .stack_list
+            .len()
+            .checked_sub(self.oldest_opened)
+            .unwrap();
         if free == self.opts.max_open {
             self.stack_list[self.oldest_opened].close();
         }
         // Open a handle to reading the directory's entries.
-        let rd = fs::read_dir(dent.path()).map_err(|err| {
-            Some(Error::from_path(self.depth, dent.path().to_path_buf(), err))
-        });
-        let mut list = DirList::Opened { depth: self.depth, it: rd };
+        let rd = fs::read_dir(dent.path())
+            .map_err(|err| Some(Error::from_path(self.depth, dent.path().to_path_buf(), err)));
+        let mut list = DirList::Opened {
+            depth: self.depth,
+            it: rd.into(),
+        };
         if let Some(ref mut cmp) = self.opts.sorter {
             let mut entries: Vec<_> = list.collect();
             entries.sort_by(|a, b| match (a, b) {
-                (&Ok(ref a), &Ok(ref b)) => cmp(a, b),
-                (&Err(_), &Err(_)) => Ordering::Equal,
-                (&Ok(_), &Err(_)) => Ordering::Greater,
-                (&Err(_), &Ok(_)) => Ordering::Less,
+                (Ok(ref a), Ok(ref b)) => cmp(a, b),
+                (Err(_), Err(_)) => Ordering::Equal,
+                (Ok(_), Err(_)) => Ordering::Greater,
+                (Err(_), Ok(_)) => Ordering::Less,
             });
             list = DirList::Closed(entries.into_iter());
         }
         if self.opts.follow_links {
-            let ancestor = Ancestor::new(&dent)
-                .map_err(|err| Error::from_io(self.depth, err))?;
+            let ancestor = Ancestor::new(dent).map_err(|err| Error::from_io(self.depth, err))?;
             self.stack_path.push(ancestor);
         }
         // We push this after stack_path since creating the Ancestor can fail.
@@ -922,9 +871,13 @@ impl IntoIter {
     }
 
     fn pop(&mut self) {
-        self.stack_list.pop().expect("BUG: cannot pop from empty stack");
+        self.stack_list
+            .pop()
+            .expect("BUG: cannot pop from empty stack");
         if self.opts.follow_links {
-            self.stack_path.pop().expect("BUG: list/path stacks out of sync");
+            self.stack_path
+                .pop()
+                .expect("BUG: list/path stacks out of sync");
         }
         // If everything in the stack is already closed, then there is
         // room for at least one more open descriptor and it will
@@ -933,8 +886,7 @@ impl IntoIter {
     }
 
     fn follow(&self, mut dent: DirEntry) -> Result<DirEntry> {
-        dent =
-            DirEntry::from_path(self.depth, dent.path().to_path_buf(), true)?;
+        dent = DirEntry::from_path(self.depth, dent.path().to_path_buf(), true)?;
         // The only way a symlink can cause a loop is if it points
         // to a directory. Otherwise, it always points to a leaf
         // and we can omit any loop checks.
@@ -945,26 +897,21 @@ impl IntoIter {
     }
 
     fn check_loop<P: AsRef<Path>>(&self, child: P) -> Result<()> {
-        let hchild = Handle::from_path(&child)
-            .map_err(|err| Error::from_io(self.depth, err))?;
+        let hchild = Handle::from_path(&child).map_err(|err| Error::from_io(self.depth, err))?;
         for ancestor in self.stack_path.iter().rev() {
             let is_same = ancestor
                 .is_same(&hchild)
                 .map_err(|err| Error::from_io(self.depth, err))?;
             if is_same {
-                return Err(Error::from_loop(
-                    self.depth,
-                    &ancestor.path,
-                    child.as_ref(),
-                ));
+                return Err(Error::from_loop(self.depth, &ancestor.path, child.as_ref()));
             }
         }
         Ok(())
     }
 
     fn is_same_file_system(&mut self, dent: &DirEntry) -> Result<bool> {
-        let dent_device = util::device_num(dent.path())
-            .map_err(|err| Error::from_entry(dent, err))?;
+        let dent_device =
+            util::device_num(dent.path()).map_err(|err| Error::from_entry(dent, err))?;
         Ok(self
             .root_device
             .map(|d| d == dent_device)
@@ -991,7 +938,7 @@ impl Iterator for DirList {
     fn next(&mut self) -> Option<Result<DirEntry>> {
         match *self {
             DirList::Closed(ref mut it) => it.next(),
-            DirList::Opened { depth, ref mut it } => match *it {
+            DirList::Opened { depth, ref mut it } => match **it {
                 Err(ref mut err) => err.take().map(Err),
                 Ok(ref mut rd) => rd.next().map(|r| match r {
                     Ok(r) => DirEntry::from_entry(depth + 1, &r),
@@ -1030,10 +977,9 @@ pub struct FilterEntry<I, P> {
 }
 
 impl<P> Iterator for FilterEntry<IntoIter, P>
-where
-    P: FnMut(&DirEntry) -> bool,
+where P: FnMut(&DirEntry) -> bool
 {
-    type Item = Result<DirEntry>;
+    type Item = Result<(WalkAction, DirEntry)>;
 
     /// Advances the iterator and returns the next value.
     ///
@@ -1041,26 +987,25 @@ where
     ///
     /// If the iterator fails to retrieve the next value, this method returns
     /// an error value. The error will be wrapped in an `Option::Some`.
-    fn next(&mut self) -> Option<Result<DirEntry>> {
+    fn next(&mut self) -> Option<Result<(WalkAction, DirEntry)>> {
         loop {
-            let dent = match self.it.next() {
+            let (action, dent) = match self.it.next() {
                 None => return None,
                 Some(result) => itry!(result),
             };
-            if !(self.predicate)(&dent) {
+            if matches!(&action, WalkAction::EnterDir) && !(self.predicate)(&dent) {
                 if dent.is_dir() {
                     self.it.skip_current_dir();
                 }
                 continue;
             }
-            return Some(Ok(dent));
+            return Some(Ok((action, dent)));
         }
     }
 }
 
 impl<P> FilterEntry<IntoIter, P>
-where
-    P: FnMut(&DirEntry) -> bool,
+where P: FnMut(&DirEntry) -> bool
 {
     /// Yields only entries which satisfy the given predicate and skips
     /// descending into directories that do not satisfy the given predicate.
@@ -1109,7 +1054,10 @@ where
     /// [`min_depth`]: struct.WalkDir.html#method.min_depth
     /// [`max_depth`]: struct.WalkDir.html#method.max_depth
     pub fn filter_entry(self, predicate: P) -> FilterEntry<Self, P> {
-        FilterEntry { it: self, predicate }
+        FilterEntry {
+            it: self,
+            predicate,
+        }
     }
 
     /// Skips the current directory.
